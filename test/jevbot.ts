@@ -636,6 +636,10 @@ assertEquals(recordedDecisions[0].roomid, "battle-test");
 assertEquals(recordedDecisions[0].type, "decision");
 assertEquals(recordedDecisions[0].data.selected_action.id, "switch_2");
 assertEquals(recordedDecisions[0].data.result.source, "jev");
+assert(
+  typeof recordedDecisions[0].data.result.request_payload_bytes === "number",
+);
+assert(recordedDecisions[0].data.result.request_payload_bytes > 0);
 assertEquals(JSON.stringify(recordedDecisions[0]).includes("test-key"), false);
 
 const forcedDecisionRecords = [];

@@ -77,6 +77,10 @@ function summarizeAction(action: LegalAction): Data {
   return { id: action.id, command: action.command, ...description };
 }
 
+function payloadBytes(payload: Data): number {
+  return new TextEncoder().encode(JSON.stringify(payload)).byteLength;
+}
+
 /** Format a decision for console output. */
 export function formatDecisionSummary(
   action: Pick<LegalAction, "id" | "description">,
@@ -234,9 +238,13 @@ export class JevDecisionModel {
     const actions = generateLegalActions(context.request, snapshot);
     if (!actions.length) return null;
     const payload = buildJevRequest(context, actions, this.model, snapshot);
+    const requestMetrics = {
+      request_payload_bytes: payloadBytes(payload),
+    };
     if (actions.length === 1) {
       this.recordDecision(context, payload, actions[0], {
         source: "single_legal_action",
+        ...requestMetrics,
       });
       return actions[0].command;
     }
@@ -290,6 +298,7 @@ export class JevDecisionModel {
         answer,
         usage: result.usage,
         elapsed_ms: elapsed,
+        ...requestMetrics,
       });
       if (this.debug) {
         console.log("[jev] answer:", JSON.stringify(answer, null, 2));
@@ -305,6 +314,7 @@ export class JevDecisionModel {
       this.recordDecision(context, payload, selected, {
         source: "fallback",
         error: error.message,
+        ...requestMetrics,
       });
       return fallback;
     }
