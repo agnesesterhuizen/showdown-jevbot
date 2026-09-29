@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "strict": false
+  },
+  "tasks": {
+    "jevbot": "deno run --allow-env --allow-net --allow-read --allow-write src/jevbot.ts",
+    "jevbot:local": "deno run --allow-env --allow-net --allow-read --allow-write src/jevbot.ts --local",
+    "jevbot:live": "deno run --allow-env --allow-net --allow-read --allow-write src/jevbot.ts --live",
+    "test": "deno run --allow-env --allow-read --allow-write test/jevbot.ts",
+    "test:live": "deno run --allow-env --allow-net --allow-read --allow-write test/jevbot.ts --live"
+  }
+}
