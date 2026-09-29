@@ -21,6 +21,7 @@ import {
   describeEntryHazards,
   describeIncomingDamage,
   describeOpponentThreats,
+  estimateBaselineDamage,
 } from "../src/local-bot-tactics.ts";
 
 const request = {
@@ -307,7 +308,7 @@ assertEquals(
 assertEquals(
   incomingDamage.revealed_move_damage_estimates[0]
     .estimated_damage_percent_range,
-  [110, 130],
+  [103.3, 122.2],
 );
 assertEquals(
   incomingDamage.possible_move_damage_estimates[0].move,
@@ -361,11 +362,12 @@ assertEquals(
     .baseline_damage,
   {
     available: true,
-    estimated_damage_hp_range: [140, 165],
-    estimated_damage_percent_range: [51.7, 60.9],
+    calculation_engine: "@smogon/calc",
+    estimated_damage_hp_range: [109, 129],
+    estimated_damage_percent_range: [40.2, 47.6],
     estimated_target_max_hp: 271,
     caveat:
-      "Baseline estimate uses exact private stats when available and default Gen 9 Random Battle stats otherwise; it excludes unrevealed modifiers, dynamic move power, critical hits, and full simulator-only effects.",
+      "Damage uses @smogon/calc Gen 9 mechanics with exact private stats when available and Gen 9 Random Battle default stats otherwise; hidden opponent information remains an assumption.",
   },
 );
 assertEquals(
@@ -394,6 +396,14 @@ assert(
     teraDamageActions.find((action) => action.id === "move_1").description
       .baseline_damage.estimated_damage_hp_range[1],
 );
+const teraBlastDamage = estimateBaselineDamage(
+  { id: "terablast", name: "Tera Blast", category: "Special" },
+  { ...request.side.pokemon[0], terastallized: true },
+  { details: "Pikachu, L93", condition: "200/200" },
+  { field: { pseudoWeather: [] }, opponentSide: { conditions: [] } },
+);
+assertEquals(teraBlastDamage.calculation_engine, "@smogon/calc");
+assert(teraBlastDamage.estimated_damage_hp_range[0] > 0);
 const tacticalPayload = buildJevRequest(
   { roomid: "battle-tactical", turn: 5, request },
   tacticalActions,
@@ -416,7 +426,7 @@ assertEquals(
 );
 assertEquals(
   formatDecisionSummary(rangedActions.find((action) => action.id === "move_2")),
-  "Use Dragon Claw; damage 51.7-60.9%; likely faster",
+  "Use Dragon Claw; damage 40.2-47.6%; likely faster",
 );
 assertEquals(
   formatDecisionSummary({

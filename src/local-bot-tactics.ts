@@ -1,4 +1,10 @@
 import Sim from "npm:pokemon-showdown@0.11.11";
+import {
+  calculate as calculateDamage,
+  Field as CalcField,
+  Move as CalcMove,
+  Pokemon as CalcPokemon,
+} from "npm:@smogon/calc@0.12.0";
 import type { BattleSnapshot, Data, Pokemon } from "./types.ts";
 
 import { inferGen9RandomBattleSet } from "./local-bot-randbats.ts";
@@ -22,6 +28,31 @@ const ABILITY_TYPE_IMMUNITIES = new Map([
 const ABILITY_BYPASSERS = new Set(["moldbreaker", "teravolt", "turboblaze"]);
 const STATUS_IDS = new Set(["brn", "frz", "par", "psn", "slp", "tox"]);
 const SLOW_SPEED_MOVES = new Set(["gyroball", "trickroom"]);
+const CALC_STATS = ["hp", "atk", "def", "spa", "spd", "spe"];
+const DEFAULT_RANDBATS_EVS = {
+  hp: 85,
+  atk: 85,
+  def: 85,
+  spa: 85,
+  spd: 85,
+  spe: 85,
+};
+const DEFAULT_IVS = { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe: 31 };
+const CALC_WEATHER = new Map([
+  ["sunnyday", "Sun"],
+  ["desolateland", "Harsh Sunshine"],
+  ["raindance", "Rain"],
+  ["primordialsea", "Heavy Rain"],
+  ["sandstorm", "Sand"],
+  ["snow", "Snow"],
+  ["hail", "Hail"],
+]);
+const CALC_TERRAIN = new Map([
+  ["electricterrain", "Electric"],
+  ["grassyterrain", "Grassy"],
+  ["mistyterrain", "Misty"],
+  ["psychicterrain", "Psychic"],
+]);
 
 function toID(value?: string | null): string {
   return (value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -141,17 +172,6 @@ function calculateStat(base: number, level: number, ev = 85, iv = 31): number {
   return Math.floor((2 * base + iv + Math.floor(ev / 4)) * level / 100) + 5;
 }
 
-function calculateHp(base: number, level: number, ev = 85, iv = 31): number {
-  return Math.floor((2 * base + iv + Math.floor(ev / 4)) * level / 100) +
-    level + 10;
-}
-
-function knownMaxHp(pokemon?: Pokemon | null): number | null {
-  if (!pokemon?.stats) return null;
-  const maxHp = Number(pokemon.condition?.split(" ")[0]?.split("/")[1]);
-  return Number.isFinite(maxHp) && maxHp > 0 ? maxHp : null;
-}
-
 function applyBoost(stat: number, boost = 0): number {
   if (boost >= 0) return Math.floor(stat * (2 + boost) / 2);
   return Math.floor(stat * 2 / (2 - boost));
@@ -269,83 +289,125 @@ export function describeSpeedComparison(
   };
 }
 
-function stabModifier(pokemon?: Pokemon | null, moveType?: string): number {
-  const species = getSpecies(pokemon);
-  const baseTypes = species?.types || [];
-  const teraType = pokemon?.teraType ||
-    (typeof pokemon?.terastallized === "string" ? pokemon.terastallized : null);
-  if (pokemon?.terastallized && teraType && toID(teraType) !== "stellar") {
-    if (moveType === teraType) return baseTypes.includes(moveType) ? 2 : 1.5;
-    return baseTypes.includes(moveType) ? 1.5 : 1;
-  }
-  return baseTypes.includes(moveType) ? 1.5 : 1;
-}
-
 function hasCondition(side?: Data | null, id?: string): boolean {
   return !!conditionById(side?.conditions || [], id);
 }
 
-function damageAbilityModifier(
-  pokemon: Pokemon | null | undefined,
-  move: Data,
-  attacking: boolean,
-): number {
-  const ability = toID(knownAbility(pokemon));
-  if (attacking) {
-    if (
-      move.category === "Physical" &&
-      (ability === "hugepower" || ability === "purepower")
-    ) return 2;
-    if (
-      move.category === "Physical" && ability === "guts" && statusOf(pokemon)
-    ) return 1.5;
-    if (
-      move.category === "Special" && ability === "flareboost" &&
-      statusOf(pokemon) === "brn"
-    ) return 1.5;
-    return 1;
-  }
-  if (move.category === "Physical" && ability === "furcoat") return 0.5;
-  if (move.category === "Special" && ability === "icescales") return 0.5;
-  if (["Fire", "Ice"].includes(move.type) && ability === "thickfat") return 0.5;
-  if (ability === "fluffy") {
-    return (move.flags?.contact ? 0.5 : 1) * (move.type === "Fire" ? 2 : 1);
-  }
-  const hp = pokemon?.condition?.split(" ")[0]?.split("/");
-  if (ability === "multiscale" && hp?.[0] === hp?.[1]) return 0.5;
-  return 1;
+function canonicalCalcName(value: string | null | undefined, dexTable: Data) {
+  if (!value) return undefined;
+  const entry = dexTable.get(value);
+  return entry?.exists ? entry.name : undefined;
 }
 
-/** Estimate damage without a full battle simulation. */
+function hpFromCondition(pokemon?: Pokemon | null): [number, number] | null {
+  const [current, maximum] = pokemon?.condition?.split(" ")[0]?.split("/") || [];
+  const hp = Number(current);
+  const maxHp = Number(maximum);
+  return Number.isFinite(hp) && Number.isFinite(maxHp) && maxHp > 0
+    ? [hp, maxHp]
+    : null;
+}
+
+function teraTypeOf(pokemon?: Pokemon | null): string | undefined {
+  if (!pokemon?.terastallized) return undefined;
+  const teraType = pokemon.teraType ||
+    (typeof pokemon.terastallized === "string" ? pokemon.terastallized : null);
+  return teraType || undefined;
+}
+
+/** Translate observed Showdown state into a calculator Pokemon. */
+function toCalcPokemon(pokemon: Pokemon, species: Data, level: number) {
+  const calcPokemon = new CalcPokemon(9, species.name, {
+    level,
+    ability: canonicalCalcName(knownAbility(pokemon), Dex.abilities),
+    abilityOn: Boolean(knownAbility(pokemon)),
+    item: canonicalCalcName(pokemon.item, Dex.items),
+    teraType: teraTypeOf(pokemon) as never,
+    status: (statusOf(pokemon) || undefined) as never,
+    boosts: pokemon.boosts || {},
+    evs: DEFAULT_RANDBATS_EVS,
+    ivs: DEFAULT_IVS,
+  });
+  const suppliedStats = pokemon.stats || {};
+  for (const stat of CALC_STATS) {
+    const value = Number(suppliedStats[stat]);
+    if (Number.isFinite(value) && value > 0) {
+      // Private side requests expose exact stats but not the originating EVs
+      // and nature. The calculator's public stat fields are authoritative.
+      calcPokemon.rawStats[stat] = value;
+      calcPokemon.stats[stat] = value;
+    }
+  }
+  const observedHp = hpFromCondition(pokemon);
+  if (observedHp) {
+    const [currentHp, observedMaxHp] = observedHp;
+    const hasPrivateStats = Object.keys(suppliedStats).length > 0;
+    if (hasPrivateStats) {
+      // The max HP in a private side request is authoritative, even when the
+      // request's `stats` object omits an HP entry.
+      calcPokemon.rawStats.hp = observedMaxHp;
+      calcPokemon.stats.hp = observedMaxHp;
+    }
+    const maxHp = calcPokemon.maxHP();
+    calcPokemon.originalCurHP = Math.max(0, Math.min(
+      maxHp,
+      hasPrivateStats ? currentHp : Math.round(maxHp * currentHp / observedMaxHp),
+    ));
+  }
+  return calcPokemon;
+}
+
+function calcSide(side?: Data | null, pokemon?: Pokemon | null): Data {
+  const volatiles = new Set(getVolatiles(pokemon));
+  return {
+    isReflect: hasCondition(side, "reflect"),
+    isLightScreen: hasCondition(side, "lightscreen"),
+    isAuroraVeil: hasCondition(side, "auroraveil"),
+    isTailwind: hasCondition(side, "tailwind"),
+    isProtected: volatiles.has("protect") || volatiles.has("maxguard"),
+    isCharge: volatiles.has("charge"),
+    isHelpingHand: volatiles.has("helpinghand"),
+    isPowerTrick: volatiles.has("powertrick"),
+  };
+}
+
+function toCalcField(
+  battleState: BattleSnapshot,
+  attackerSide?: Data | null,
+  targetSide?: Data | null,
+  attacker?: Pokemon | null,
+  target?: Pokemon | null,
+) {
+  const effects = fieldIds(battleState.field);
+  const weather = [...effects].map((effect) => CALC_WEATHER.get(effect)).find(
+    Boolean,
+  );
+  const terrain = [...effects].map((effect) => CALC_TERRAIN.get(effect)).find(
+    Boolean,
+  );
+  return new CalcField({
+    gameType: "Singles",
+    weather: weather as never,
+    terrain: terrain as never,
+    isGravity: effects.has("gravity"),
+    attackerSide: calcSide(attackerSide, attacker),
+    defenderSide: calcSide(targetSide, target),
+  });
+}
+
+/** Calculate Gen 9 damage through @smogon/calc. */
 export function estimateBaselineDamage(
   move: Data,
   attacker?: Pokemon | null,
   target?: Pokemon | null,
   battleState: BattleSnapshot = {},
   targetSide: Data | null | undefined = battleState.opponentSide,
+  attackerSide: Data | null | undefined = battleState.ownSide,
 ): Data | null {
-  if (
-    !target || move.category === "Status" || !move.basePower ||
-    move.basePowerCallback || move.damage || move.ohko ||
-    move.id === "terablast" || move.overrideOffensiveStat ||
-    move.overrideDefensiveStat ||
-    move.overrideOffensivePokemon || move.overrideDefensivePokemon
-  ) {
+  if (!attacker || !target || move.category === "Status") {
     return {
       available: false,
-      reason: "Move has no fixed direct base power for a baseline estimate",
-    };
-  }
-  const matchup = describeMoveMatchup(
-    move.type,
-    target,
-    knownAbility(attacker),
-  );
-  if (matchup.type_effectiveness_multiplier === 0) {
-    return {
-      available: true,
-      estimated_damage_percent_range: [0, 0],
-      reason: matchup.type_matchup,
+      reason: "Move does not deal direct damage or is missing a battler",
     };
   }
   const attackerLevel = getLevel(attacker);
@@ -355,97 +417,46 @@ export function estimateBaselineDamage(
   if (!attackerLevel || !targetLevel || !attackerSpecies || !targetSpecies) {
     return { available: false, reason: "Missing level or species data" };
   }
-  const stat = move.category === "Physical" ? "atk" : "spa";
-  const defenseStat = move.category === "Physical" ? "def" : "spd";
-  const attackerRawStat = attacker?.stats?.[stat] ||
-    calculateStat(attackerSpecies.baseStats[stat], attackerLevel);
-  const attack = applyBoost(attackerRawStat, attacker?.boosts?.[stat] || 0);
-  const targetRawDefense = target?.stats?.[defenseStat] ||
-    calculateStat(targetSpecies.baseStats[defenseStat], targetLevel);
-  const targetDefense = applyBoost(
-    targetRawDefense,
-    target?.boosts?.[defenseStat] || 0,
-  );
-  const targetHp = knownMaxHp(target) ||
-    calculateHp(targetSpecies.baseStats.hp, targetLevel);
-  let modifier = stabModifier(attacker, move.type) *
-    matchup.type_effectiveness_multiplier;
-  const attackerItem = toID(attacker?.item);
-  const targetItem = toID(target?.item);
-  if (attackerItem === "lifeorb") modifier *= 1.3;
-  if (attackerItem === "choiceband" && move.category === "Physical") {
-    modifier *= 1.5;
+  try {
+    const calcAttacker = toCalcPokemon(attacker, attackerSpecies, attackerLevel);
+    const calcTarget = toCalcPokemon(target, targetSpecies, targetLevel);
+    const result = calculateDamage(
+      9,
+      calcAttacker,
+      calcTarget,
+      new CalcMove(9, move.name),
+      toCalcField(battleState, attackerSide, targetSide, attacker, target),
+    );
+    const rolls = (Array.isArray(result.damage) ? result.damage : [result.damage])
+      .flat(Infinity) as unknown[];
+    const numericRolls = rolls
+      .filter((damage): damage is number =>
+        typeof damage === "number" && Number.isFinite(damage)
+      );
+    if (!numericRolls.length) {
+      return { available: false, reason: "Calculator returned no damage rolls" };
+    }
+    const minimum = Math.min(...numericRolls);
+    const maximum = Math.max(...numericRolls);
+    const targetHp = calcTarget.maxHP();
+    return {
+      available: true,
+      calculation_engine: "@smogon/calc",
+      estimated_damage_hp_range: [minimum, maximum],
+      estimated_damage_percent_range: [
+        roundedPercent(minimum * 100 / targetHp),
+        roundedPercent(maximum * 100 / targetHp),
+      ],
+      estimated_target_max_hp: targetHp,
+      caveat:
+        "Damage uses @smogon/calc Gen 9 mechanics with exact private stats when available and Gen 9 Random Battle default stats otherwise; hidden opponent information remains an assumption.",
+    };
+  } catch (error) {
+    return {
+      available: false,
+      reason: `Calculator could not estimate this move: ${error.message}`,
+    };
   }
-  if (attackerItem === "choicespecs" && move.category === "Special") {
-    modifier *= 1.5;
-  }
-  if (targetItem === "assaultvest" && move.category === "Special") {
-    modifier /= 1.5;
-  }
-  if (targetItem === "eviolite") modifier /= 1.5;
-  modifier *= damageAbilityModifier(attacker, move, true);
-  modifier *= damageAbilityModifier(target, move, false);
-  if (
-    statusOf(attacker) === "brn" && move.category === "Physical" &&
-    toID(knownAbility(attacker)) !== "guts" && move.id !== "facade"
-  ) {
-    modifier *= 0.5;
-  }
-  const effects = fieldIds(battleState.field);
-  if (
-    (effects.has("sunnyday") || effects.has("desolateland")) &&
-    move.type === "Fire"
-  ) modifier *= 1.5;
-  if (
-    (effects.has("sunnyday") || effects.has("desolateland")) &&
-    move.type === "Water"
-  ) modifier *= 0.5;
-  if (
-    (effects.has("raindance") || effects.has("primordialsea")) &&
-    move.type === "Water"
-  ) modifier *= 1.5;
-  if (
-    (effects.has("raindance") || effects.has("primordialsea")) &&
-    move.type === "Fire"
-  ) modifier *= 0.5;
-  if (
-    effects.has("sandstorm") && move.category === "Special" &&
-    getEffectiveTypes(target).includes("Rock")
-  ) modifier *= 2 / 3;
-  if (
-    effects.has("snow") && move.category === "Physical" &&
-    getEffectiveTypes(target).includes("Ice")
-  ) modifier *= 2 / 3;
-  if (
-    (move.category === "Physical" &&
-      (hasCondition(targetSide, "reflect") ||
-        hasCondition(targetSide, "auroraveil"))) ||
-    (move.category === "Special" &&
-      (hasCondition(targetSide, "lightscreen") ||
-        hasCondition(targetSide, "auroraveil")))
-  ) {
-    modifier *= 0.5;
-  }
-  const baseDamage = Math.floor(
-    Math.floor(
-      Math.floor(
-        (2 * attackerLevel / 5 + 2) * move.basePower * attack / targetDefense,
-      ) / 50,
-    ),
-  ) + 2;
-  const maximum = Math.max(1, Math.floor(baseDamage * modifier));
-  const minimum = Math.max(1, Math.floor(maximum * 0.85));
-  return {
-    available: true,
-    estimated_damage_hp_range: [minimum, maximum],
-    estimated_damage_percent_range: [
-      roundedPercent(minimum * 100 / targetHp),
-      roundedPercent(maximum * 100 / targetHp),
-    ],
-    estimated_target_max_hp: targetHp,
-    caveat:
-      "Baseline estimate uses exact private stats when available and default Gen 9 Random Battle stats otherwise; it excludes unrevealed modifiers, dynamic move power, critical hits, and full simulator-only effects.",
-  };
 }
 
 export function describeIncomingDamage(
@@ -471,6 +482,7 @@ export function describeIncomingDamage(
       target,
       battleState,
       battleState.ownSide,
+      battleState.opponentSide,
     );
     if (!estimate.available) {
       if (unestimated.length < 6) unestimated.push(move.name);
