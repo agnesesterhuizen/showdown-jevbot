@@ -8,6 +8,7 @@ import type {
 
 import {
   describeMoveMatchup,
+  describeMoveTactics,
   describeSpeedComparison,
   describeSwitchTactics,
   estimateBaselineDamage,
@@ -121,6 +122,7 @@ function generateMoveActions(
         ownActive?.ability || ownActive?.baseAbility,
       ),
       speed_comparison: speedComparison,
+      ...describeMoveTactics(moveData, ownActive, opponent, battleState),
       baseline_damage: estimateBaselineDamage(
         moveData,
         ownActive,

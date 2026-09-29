@@ -303,6 +303,11 @@ export class BattleStateTracker {
       pokemon.ability = parts[3];
       return;
     }
+    if (type === "immune") {
+      const ability = parts.slice(3).join("|").match(/ability: ([^|]+)/i)?.[1];
+      if (ability) pokemon.ability = ability.trim();
+      return;
+    }
     if (type === "endability") {
       pokemon.abilityState = "suppressed or removed";
       return;

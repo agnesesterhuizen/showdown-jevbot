@@ -97,6 +97,28 @@ export function describeMoveMatchup(
       known_ability_immunity: ability,
     };
   }
+  const possibleAbilities =
+    inferGen9RandomBattleSet(target)?.possibleAbilities ||
+    [];
+  const inferredImmunities = possibleAbilities.filter((possibleAbility) =>
+    ABILITY_TYPE_IMMUNITIES.get(toID(possibleAbility))?.has(moveType)
+  );
+  if (
+    inferredImmunities.length &&
+    inferredImmunities.length === possibleAbilities.length &&
+    !ABILITY_BYPASSERS.has(toID(attackerAbility))
+  ) {
+    return {
+      target_types: types,
+      type_effectiveness_multiplier: 0,
+      type_matchup: `No effect due to inferred ability immunity: ${
+        inferredImmunities.join(
+          ", ",
+        )
+      }`,
+      inferred_ability_immunity: inferredImmunities,
+    };
+  }
   const multiplier = Dex.getImmunity(moveType, types)
     ? 2 ** Dex.getEffectiveness(moveType, types)
     : 0;
@@ -110,6 +132,13 @@ export function describeMoveMatchup(
       : multiplier < 1
       ? `${multiplier}x resisted`
       : "Neutral",
+    ...(inferredImmunities.length
+      ? {
+        possible_ability_immunities: inferredImmunities,
+        ability_immunity_caveat:
+          "This move may be ineffective if the opponent has one of these possible abilities.",
+      }
+      : {}),
   };
 }
 
@@ -300,7 +329,8 @@ function canonicalCalcName(value: string | null | undefined, dexTable: Data) {
 }
 
 function hpFromCondition(pokemon?: Pokemon | null): [number, number] | null {
-  const [current, maximum] = pokemon?.condition?.split(" ")[0]?.split("/") || [];
+  const [current, maximum] = pokemon?.condition?.split(" ")[0]?.split("/") ||
+    [];
   const hp = Number(current);
   const maxHp = Number(maximum);
   return Number.isFinite(hp) && Number.isFinite(maxHp) && maxHp > 0
@@ -349,10 +379,15 @@ function toCalcPokemon(pokemon: Pokemon, species: Data, level: number) {
       calcPokemon.stats.hp = observedMaxHp;
     }
     const maxHp = calcPokemon.maxHP();
-    calcPokemon.originalCurHP = Math.max(0, Math.min(
-      maxHp,
-      hasPrivateStats ? currentHp : Math.round(maxHp * currentHp / observedMaxHp),
-    ));
+    calcPokemon.originalCurHP = Math.max(
+      0,
+      Math.min(
+        maxHp,
+        hasPrivateStats
+          ? currentHp
+          : Math.round(maxHp * currentHp / observedMaxHp),
+      ),
+    );
   }
   return calcPokemon;
 }
@@ -418,7 +453,11 @@ export function estimateBaselineDamage(
     return { available: false, reason: "Missing level or species data" };
   }
   try {
-    const calcAttacker = toCalcPokemon(attacker, attackerSpecies, attackerLevel);
+    const calcAttacker = toCalcPokemon(
+      attacker,
+      attackerSpecies,
+      attackerLevel,
+    );
     const calcTarget = toCalcPokemon(target, targetSpecies, targetLevel);
     const result = calculateDamage(
       9,
@@ -427,14 +466,18 @@ export function estimateBaselineDamage(
       new CalcMove(9, move.name),
       toCalcField(battleState, attackerSide, targetSide, attacker, target),
     );
-    const rolls = (Array.isArray(result.damage) ? result.damage : [result.damage])
-      .flat(Infinity) as unknown[];
+    const rolls =
+      (Array.isArray(result.damage) ? result.damage : [result.damage])
+        .flat(Infinity) as unknown[];
     const numericRolls = rolls
       .filter((damage): damage is number =>
         typeof damage === "number" && Number.isFinite(damage)
       );
     if (!numericRolls.length) {
-      return { available: false, reason: "Calculator returned no damage rolls" };
+      return {
+        available: false,
+        reason: "Calculator returned no damage rolls",
+      };
     }
     const minimum = Math.min(...numericRolls);
     const maximum = Math.max(...numericRolls);
@@ -496,14 +539,130 @@ export function describeIncomingDamage(
     (right.estimated_damage_percent_range?.[1] || 0) -
     (left.estimated_damage_percent_range?.[1] || 0);
   possible.sort(byMaximumDamage);
+  const [currentHp, maximumHp] = hpFromCondition(target) || [];
+  const currentHpPercent = currentHp !== undefined && maximumHp !== undefined
+    ? roundedPercent(currentHp * 100 / maximumHp)
+    : null;
+  const revealedKoThreats = currentHpPercent === null
+    ? []
+    : revealed.filter((entry) =>
+      entry.estimated_damage_percent_range?.[1] >= currentHpPercent
+    ).map((entry) => entry.move);
   return {
     revealed_move_damage_estimates: revealed.sort(byMaximumDamage),
     possible_move_damage_estimates: possible.slice(0, 5),
+    ...(currentHpPercent === null ? {} : {
+      current_hp_percent: currentHpPercent,
+      revealed_moves_that_can_ko: revealedKoThreats,
+    }),
     ...(unestimated.length
       ? { unestimated_possible_damaging_moves: unestimated }
       : {}),
     caveat:
       "Possible-move estimates are candidate-set possibilities, not confirmed opponent moves.",
+  };
+}
+
+function lastMoveBy(
+  opponent?: Pokemon | null,
+  battleState?: BattleSnapshot,
+): string | null {
+  if (!opponent?.side) return null;
+  for (const line of [...(battleState?.recentEvents || [])].reverse()) {
+    const parts = line.split("|");
+    if (parts[1] === "move" && parts[2]?.startsWith(opponent.side)) {
+      return parts[3] || null;
+    }
+  }
+  return null;
+}
+
+function revealedRecoveryMoves(opponent?: Pokemon | null): string[] {
+  return (opponent?.revealedMoves || opponent?.revealed_moves || []).filter(
+    (moveName) => Boolean(Dex.moves.get(String(moveName)).heal),
+  );
+}
+
+/** Describe the risk and tactical context of staying in to use a move. */
+export function describeMoveTactics(
+  move: Data,
+  attacker: Pokemon,
+  opponent: Pokemon | null | undefined,
+  battleState: BattleSnapshot,
+): Data {
+  const warnings = [];
+  const boosts = Object.entries(opponent?.boosts || {})
+    .filter(([, amount]) => Number(amount) > 0)
+    .map(([stat, amount]) => `${stat} +${amount}`);
+  if (boosts.length) {
+    warnings.push(`Opponent has positive boosts: ${boosts.join(", ")}`);
+  }
+  const recoveryMoves = revealedRecoveryMoves(opponent);
+  if (recoveryMoves.length) {
+    warnings.push(
+      `Opponent has revealed recovery: ${recoveryMoves.join(", ")}`,
+    );
+  }
+
+  const result: Data = {
+    opponent_threats: describeOpponentThreats(opponent, attacker),
+    incoming_damage: describeIncomingDamage(opponent, attacker, battleState),
+    ...(warnings.length ? { tactical_warnings: warnings } : {}),
+  };
+  if (toID(move.id) === "encore") {
+    const lastMove = lastMoveBy(opponent, battleState);
+    if (lastMove) {
+      result.support_opportunity =
+        `Encore can force the opponent to repeat its last move: ${lastMove}.`;
+    }
+    if (toID(knownAbility(attacker)) === "prankster") {
+      result.support_priority =
+        "Prankster gives this status move +1 priority against non-Dark targets.";
+    }
+  }
+  if (toID(move.id) === "leechseed") {
+    result.support_opportunity =
+      "Leech Seed creates recurring chip and recovery, which is valuable against a foe with revealed recovery.";
+  }
+  return result;
+}
+
+/** Describe what a switch-in can threaten on the following turn. */
+export function describeSwitchOffense(
+  pokemon: Pokemon,
+  battleState: BattleSnapshot,
+): Data {
+  const opponent = battleState.opponentActive;
+  if (!opponent) return {};
+  const damagingMoves = (pokemon.moves || []).flatMap((moveName) => {
+    const move = Dex.moves.get(String(moveName));
+    if (!move.exists || move.category === "Status") return [];
+    const baselineDamage = estimateBaselineDamage(
+      move,
+      pokemon,
+      opponent,
+      battleState,
+    );
+    return [{
+      move: move.name,
+      type: move.type,
+      ...describeMoveMatchup(move.type, opponent, knownAbility(pokemon)),
+      baseline_damage: baselineDamage,
+    }];
+  });
+  damagingMoves.sort((left, right) =>
+    (right.baseline_damage?.estimated_damage_percent_range?.[1] || 0) -
+    (left.baseline_damage?.estimated_damage_percent_range?.[1] || 0)
+  );
+  const supportMoves = (pokemon.moves || []).flatMap((moveName) => {
+    const move = Dex.moves.get(String(moveName));
+    return move.exists && move.category === "Status" ? [move.name] : [];
+  });
+  return {
+    next_turn_best_damaging_moves: damagingMoves.slice(0, 3),
+    ...(supportMoves.length ? { next_turn_support_moves: supportMoves } : {}),
+    next_turn_offense_caveat:
+      "These estimates apply after the switch-in survives this turn; the opponent may also switch.",
   };
 }
 
@@ -645,5 +804,6 @@ export function describeSwitchTactics(
       pokemon,
       battleState,
     ),
+    ...describeSwitchOffense(pokemon, battleState),
   };
 }

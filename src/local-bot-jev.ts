@@ -14,6 +14,11 @@ import type {
 
 const DEFAULT_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
 const DEFAULT_MODEL = "typesafe/jev-1.13";
+const SHARED_MOVE_TACTIC_KEYS = [
+  "opponent_threats",
+  "incoming_damage",
+  "tactical_warnings",
+];
 
 function summarizePokemon(pokemon: Pokemon, index: number): Data {
   return {
@@ -51,6 +56,25 @@ function summarizeOpponentSide(publicState?: Data | null): Data | null {
 
 function formatPercentRange(range?: [number, number]): string | null {
   return range ? `${range[0]}-${range[1]}%` : null;
+}
+
+function sharedMoveTactics(actions: LegalAction[]): Data | undefined {
+  const move = actions.find((action) => action.kind === "move");
+  if (!move) return undefined;
+  const tactics = Object.fromEntries(
+    SHARED_MOVE_TACTIC_KEYS.flatMap((key) =>
+      move.description[key] === undefined ? [] : [[key, move.description[key]]]
+    ),
+  );
+  return Object.keys(tactics).length ? tactics : undefined;
+}
+
+function summarizeAction(action: LegalAction): Data {
+  const description = { ...action.description };
+  if (action.kind === "move" || action.kind === "move-terastallize") {
+    for (const key of SHARED_MOVE_TACTIC_KEYS) delete description[key];
+  }
+  return { id: action.id, command: action.command, ...description };
 }
 
 /** Format a decision for console output. */
@@ -91,6 +115,7 @@ export function buildJevRequest(
   const active = request.active?.[0];
   const { ownSide = null, opponentSide = null, field, recentEvents = [] } =
     snapshot;
+  const activeTactics = sharedMoveTactics(actions);
   return {
     model,
     session_id: roomid,
@@ -113,14 +138,11 @@ export function buildJevRequest(
           maybe_trapped: !!active.maybeTrapped,
           can_terastallize_into: active.canTerastallize,
           moves: active.moves,
+          ...(activeTactics ? { tactics: activeTactics } : {}),
         }
         : undefined,
       recent_public_battle_events: recentEvents,
-      legal_actions: actions.map((action) => ({
-        id: action.id,
-        command: action.command,
-        ...action.description,
-      })),
+      legal_actions: actions.map(summarizeAction),
     },
     questions: {
       action: {
@@ -143,7 +165,10 @@ export function buildJevRequest(
           ],
         },
         criteria: Object.fromEntries(
-          actions.map((action) => [action.id, action.description]),
+          // `legal_actions` already contains the full tactical evidence. Keeping
+          // a second copy here made large battles exceed the decision endpoint's
+          // input limit, especially with Tera variants and several switch-ins.
+          actions.map((action) => [action.id, action.description.action]),
         ),
       },
     },

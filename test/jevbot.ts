@@ -331,6 +331,33 @@ assertEquals(rotomSwitch.entry_hazard_hp_loss_percent, 12.5);
 assertEquals(rotomSwitch.grounded, false);
 assertEquals(rotomSwitch.grounded_reason, "levitate");
 assertEquals(typeof rotomSwitch.incoming_damage, "object");
+assertEquals(typeof rotomSwitch.next_turn_best_damaging_moves, "object");
+assertEquals(
+  tacticalActions.find((action) => action.id === "move_1").description
+    .incoming_damage.revealed_move_damage_estimates,
+  [],
+);
+const inferredLevitateActions = generateLegalActions(request, {
+  opponentActive: { details: "Eelektross, L87, M" },
+});
+assertEquals(
+  inferredLevitateActions.find((action) => action.id === "move_1").description
+    .type_matchup,
+  "No effect due to inferred ability immunity: Levitate",
+);
+const immuneTracker = new BattleStateTracker();
+immuneTracker.observe(
+  "battle-immune",
+  "|switch|p2a: Eelektross|Eelektross, L87, M|100/100",
+);
+immuneTracker.observe(
+  "battle-immune",
+  "|-immune|p2a: Eelektross|[from] ability: Levitate",
+);
+assertEquals(
+  immuneTracker.getSnapshot("battle-immune", "p1").opponentActive.ability,
+  "Levitate",
+);
 const teraActions = generateLegalActions(request, {
   opponentActive: {
     details: "Charizard, L85, M",
@@ -423,6 +450,16 @@ assertEquals(
   tacticalPayload.state.legal_actions.find((action) => action.id === "switch_2")
     .entry_hazard_hp_loss_percent,
   12.5,
+);
+assertEquals(
+  tacticalPayload.state.current_active_request.tactics.incoming_damage
+    .revealed_move_damage_estimates,
+  [],
+);
+assertEquals(
+  tacticalPayload.state.legal_actions.find((action) => action.id === "move_1")
+    .incoming_damage,
+  undefined,
 );
 assertEquals(
   formatDecisionSummary(rangedActions.find((action) => action.id === "move_2")),
@@ -539,6 +576,7 @@ assertEquals(
   Object.keys(payload.questions.action.criteria),
   actions.map((action) => action.id),
 );
+assertEquals(payload.questions.action.criteria.move_1, "Use Earthquake");
 assertEquals(payload.state.own_side.team.length, 3);
 assertEquals(payload.state.opponent_side.active.details, "Corviknight, L80");
 assertEquals(
