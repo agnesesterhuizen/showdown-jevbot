@@ -1,10 +1,10 @@
 #!/usr/bin/env -S deno run --allow-env --allow-net --allow-read --allow-write
 
-import { DecisionModel } from "./local-bot-decision.ts";
-import { formatBattleEvent } from "./local-bot-battle-log.ts";
-import { JevDecisionModel } from "./local-bot-jev.ts";
-import { getLoginAssertion, redactProtocolMessage } from "./local-bot-login.ts";
-import { BattleRecorder } from "./local-bot-recorder.ts";
+import { DecisionModel } from "./decision.ts";
+import { formatBattleEvent } from "./battle-log.ts";
+import { JevDecisionModel } from "./jev.ts";
+import { getLoginAssertion, redactProtocolMessage } from "./login.ts";
+import { BattleRecorder } from "./recorder.ts";
 import type { BattleRequest } from "./types.ts";
 
 const localOverride = Deno.args.includes("--local");

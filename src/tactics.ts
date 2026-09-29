@@ -7,7 +7,7 @@ import {
 } from "npm:@smogon/calc@0.12.0";
 import type { BattleSnapshot, Data, Pokemon } from "./types.ts";
 
-import { inferGen9RandomBattleSet } from "./local-bot-randbats.ts";
+import { inferGen9RandomBattleSet } from "./randbats.ts";
 
 const { Dex } = Sim;
 

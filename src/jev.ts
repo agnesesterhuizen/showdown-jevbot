@@ -1,7 +1,7 @@
-import { generateLegalActions } from "./local-bot-actions.ts";
-import { DecisionModel as FallbackDecisionModel } from "./local-bot-decision.ts";
-import { addGen9RandomBattleInference } from "./local-bot-randbats.ts";
-import { BattleStateTracker } from "./local-bot-state.ts";
+import { generateLegalActions } from "./actions.ts";
+import { DecisionModel as FallbackDecisionModel } from "./decision.ts";
+import { addGen9RandomBattleInference } from "./randbats.ts";
+import { BattleStateTracker } from "./state.ts";
 import type {
   BattleSnapshot,
   Data,

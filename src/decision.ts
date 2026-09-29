@@ -1,4 +1,4 @@
-import { generateLegalActions } from "./local-bot-actions.ts";
+import { generateLegalActions } from "./actions.ts";
 import type { DecisionContext } from "./types.ts";
 
 /** First legal action fallback. */

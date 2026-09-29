@@ -12,7 +12,7 @@ import {
   describeSpeedComparison,
   describeSwitchTactics,
   estimateBaselineDamage,
-} from "./local-bot-tactics.ts";
+} from "./tactics.ts";
 
 const { Dex } = Sim;
 

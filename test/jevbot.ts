@@ -1,28 +1,25 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 
-import { generateLegalActions } from "../src/local-bot-actions.ts";
+import { generateLegalActions } from "../src/actions.ts";
 import {
   buildJevRequest,
   formatDecisionSummary,
   JevDecisionModel,
-} from "../src/local-bot-jev.ts";
-import { formatBattleEvent } from "../src/local-bot-battle-log.ts";
-import {
-  getLoginAssertion,
-  redactProtocolMessage,
-} from "../src/local-bot-login.ts";
+} from "../src/jev.ts";
+import { formatBattleEvent } from "../src/battle-log.ts";
+import { getLoginAssertion, redactProtocolMessage } from "../src/login.ts";
 import {
   addGen9RandomBattleInference,
   inferGen9RandomBattleSet,
-} from "../src/local-bot-randbats.ts";
-import { BattleRecorder } from "../src/local-bot-recorder.ts";
-import { BattleStateTracker } from "../src/local-bot-state.ts";
+} from "../src/randbats.ts";
+import { BattleRecorder } from "../src/recorder.ts";
+import { BattleStateTracker } from "../src/state.ts";
 import {
   describeEntryHazards,
   describeIncomingDamage,
   describeOpponentThreats,
   estimateBaselineDamage,
-} from "../src/local-bot-tactics.ts";
+} from "../src/tactics.ts";
 
 const request = {
   rqid: 7,
