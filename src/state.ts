@@ -34,6 +34,7 @@ const TRACKED_EVENT_TYPES = new Set([
   "sethp",
   "sidestart",
   "sideend",
+  "singleturn",
   "start",
   "status",
   "supereffective",
@@ -72,6 +73,16 @@ function getConditionStatus(condition?: string): string | undefined {
 function isFainted(condition?: string): boolean {
   return condition?.split(" ").includes("fnt") ||
     condition?.startsWith("0 fnt") || false;
+}
+
+function hpFromCondition(condition?: string): [number, number] | null {
+  const match = condition?.match(/^(\d+)\/(\d+)/);
+  if (!match) return null;
+  const current = Number(match[1]);
+  const maximum = Number(match[2]);
+  return Number.isFinite(current) && Number.isFinite(maximum) && maximum > 0
+    ? [current, maximum]
+    : null;
 }
 
 function effectName(effect?: string): string {
@@ -137,6 +148,7 @@ export class BattleStateTracker {
         pseudoWeather: mapValues(battle.field.pseudoWeather).map(clone),
       },
       recentEvents: [...battle.events],
+      observedDamage: (battle.observedDamage || []).map(clone),
       opponentActive: opponent?.active || null,
     };
   }
@@ -148,6 +160,7 @@ export class BattleStateTracker {
       opponentSide: null,
       field: { weather: null, terrain: null, pseudoWeather: [] },
       recentEvents: [],
+      observedDamage: [],
       opponentActive: null,
     };
   }
@@ -162,6 +175,8 @@ export class BattleStateTracker {
       battle = {
         events: [],
         turn: 0,
+        lastMove: null,
+        observedDamage: [],
         pokemon: new Map(),
         activeBySide: new Map(),
         sides: new Map(),
@@ -222,6 +237,7 @@ export class BattleStateTracker {
       }
     }
     pokemon.active = true;
+    pokemon.enteredTurn = battle.turn;
     pokemon.boosts = {};
     pokemon.volatileEffects = [];
     battle.activeBySide.set(pokemon.side, pokemon.ident);
@@ -282,6 +298,9 @@ export class BattleStateTracker {
       return;
     }
     if (["damage", "heal", "sethp"].includes(type)) {
+      if (type === "damage") {
+        this.recordDirectHit(battle, pokemon, parts, pokemon.condition);
+      }
       this.setCondition(pokemon, parts[3]);
       return;
     }
@@ -297,6 +316,12 @@ export class BattleStateTracker {
       if (parts[3] && !pokemon.revealedMoves.includes(parts[3])) {
         pokemon.revealedMoves.push(parts[3]);
       }
+      battle.lastMove = {
+        source: pokemon.ident,
+        move: parts[3],
+        target: parts[4],
+        turn: battle.turn,
+      };
       return;
     }
     if (type === "ability") {
@@ -376,6 +401,43 @@ export class BattleStateTracker {
     if (type === "start" || type === "end") {
       this.updateVolatile(pokemon, type, parts[3]);
     }
+  }
+
+  /** Record hit-dependent move state from direct move damage only. */
+  recordDirectHit(
+    battle: Data,
+    pokemon: Pokemon,
+    parts: string[],
+    previousCondition?: string,
+  ): void {
+    const lastMove = battle.lastMove;
+    if (
+      !lastMove || lastMove.target !== pokemon.ident ||
+      lastMove.source === pokemon.ident ||
+      parts.slice(4).some((part) => part.startsWith("[from]"))
+    ) return;
+    pokemon.rageFistHitsTaken = Math.min(
+      6,
+      (Number(pokemon.rageFistHitsTaken) || 0) + 1,
+    );
+
+    const previousHp = hpFromCondition(previousCondition);
+    const nextHp = hpFromCondition(parts[3]);
+    if (
+      !previousHp || !nextHp || previousHp[1] !== nextHp[1] ||
+      nextHp[0] >= previousHp[0]
+    ) return;
+    const damage = previousHp[0] - nextHp[0];
+    battle.observedDamage.push({
+      source: lastMove.source,
+      target: pokemon.ident,
+      move: lastMove.move,
+      damage_hp: damage,
+      target_max_hp: previousHp[1],
+      damage_percent: Math.round(damage * 1000 / previousHp[1]) / 10,
+      turn: battle.turn,
+    });
+    if (battle.observedDamage.length > 40) battle.observedDamage.shift();
   }
 
   replaceSpecies(details?: string, species?: string): string | undefined {

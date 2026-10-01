@@ -16,11 +16,12 @@ Deno downloads dependencies on the first run.
 
 ## Run modes
 
-| Command                                  | Server                                    | Identity                               |
-| ---------------------------------------- | ----------------------------------------- | -------------------------------------- |
-| `deno task --env-file=.env jevbot:local` | `ws://127.0.0.1:8000/showdown/websocket`  | `BOT_NAME`, or `JevBot` by default     |
-| `deno task --env-file=.env jevbot`       | Follows `PS_LIVE` and other `.env` values | `BOT_NAME` locally; `PS_USERNAME` live |
-| `deno task --env-file=.env jevbot:live`  | Official secure WebSocket                 | `PS_USERNAME`                          |
+| Command                                     | Server                                    | Identity                                |
+| ------------------------------------------- | ----------------------------------------- | --------------------------------------- |
+| `deno task --env-file=.env jevbot:local`    | `ws://127.0.0.1:8000/showdown/websocket`  | `BOT_NAME`, or `JevBot` by default      |
+| `deno task --env-file=.env jevbot`          | Follows `PS_LIVE` and other `.env` values | `BOT_NAME` locally; `PS_USERNAME` live  |
+| `deno task --env-file=.env jevbot:live`     | Official secure WebSocket                 | `PS_USERNAME`                           |
+| `deno task --env-file=.env jevbot:parallel` | Official secure WebSocket                 | `PS_USERNAME`; up to five games at once |
 
 The local and live commands override `PS_LIVE`. Use `--env-file=.env` to load
 the file.
@@ -52,6 +53,22 @@ Then run:
 ```sh
 deno task --env-file=.env jevbot:live
 ```
+
+### Ladder runs
+
+Play a fixed number of games:
+
+```sh
+deno task --env-file=.env jevbot:ladder --games 20
+```
+
+Or use up to five parallel games:
+
+```sh
+deno task --env-file=.env jevbot:parallel --games 20
+```
+
+Runs are written to `logs/jevbot/run-*/`.
 
 `PS_LIVE=1` uses `wss://sim3.psim.us/showdown/websocket` by default. Set
 `PS_URL` to use a different endpoint.
@@ -86,6 +103,22 @@ Recording writes JSONL files to `logs/jevbot/<battle-room>.jsonl`:
 
 Decision records include the request state, action, response, usage, latency,
 and fallback reason.
+
+## Audit
+
+Set `DEEPSEEK_API_KEY` in `.env`, then audit a run:
+
+```sh
+deno task --env-file=.env audit --run logs/jevbot/run-2026-09-30T10-00-00-000Z
+```
+
+Or audit the newest `logs/jevbot/run-*` directory:
+
+```sh
+deno task --env-file=.env audit --latest
+```
+
+Reviews are saved in the run's `audit/` directory and the report is `audit.md`.
 
 ## Tests
 

@@ -58,6 +58,7 @@ export interface BattleSnapshot extends Data {
   opponentActive?: Pokemon | null;
   field?: Data | null;
   recentEvents?: string[];
+  observedDamage?: Data[];
 }
 
 export interface LegalAction {

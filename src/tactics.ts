@@ -28,6 +28,12 @@ const ABILITY_TYPE_IMMUNITIES = new Map([
 const ABILITY_BYPASSERS = new Set(["moldbreaker", "teravolt", "turboblaze"]);
 const STATUS_IDS = new Set(["brn", "frz", "par", "psn", "slp", "tox"]);
 const SLOW_SPEED_MOVES = new Set(["gyroball", "trickroom"]);
+const ENTRY_HAZARD_CONDITIONS = new Set([
+  "stealthrock",
+  "spikes",
+  "toxicspikes",
+  "stickyweb",
+]);
 const CALC_STATS = ["hp", "atk", "def", "spa", "spd", "spe"];
 const DEFAULT_RANDBATS_EVS = {
   hp: 85,
@@ -430,6 +436,18 @@ function toCalcField(
   });
 }
 
+function calcMoveOptions(move: Data, attacker?: Pokemon | null): Data {
+  if (toID(move.id) !== "ragefist") return {};
+  const hitsTaken = Math.max(
+    0,
+    Math.min(6, Number(attacker?.rageFistHitsTaken) || 0),
+  );
+  return {
+    overrides: { basePower: 50 + 50 * hitsTaken },
+    rage_fist_hits_taken: hitsTaken,
+  };
+}
+
 /** Calculate Gen 9 damage through @smogon/calc. */
 export function estimateBaselineDamage(
   move: Data,
@@ -459,11 +477,12 @@ export function estimateBaselineDamage(
       attackerLevel,
     );
     const calcTarget = toCalcPokemon(target, targetSpecies, targetLevel);
+    const moveOptions = calcMoveOptions(move, attacker);
     const result = calculateDamage(
       9,
       calcAttacker,
       calcTarget,
-      new CalcMove(9, move.name),
+      new CalcMove(9, move.name, moveOptions),
       toCalcField(battleState, attackerSide, targetSide, attacker, target),
     );
     const rolls =
@@ -491,6 +510,10 @@ export function estimateBaselineDamage(
         roundedPercent(maximum * 100 / targetHp),
       ],
       estimated_target_max_hp: targetHp,
+      ...(moveOptions.rage_fist_hits_taken === undefined ? {} : {
+        rage_fist_hits_taken: moveOptions.rage_fist_hits_taken,
+        effective_base_power: moveOptions.overrides.basePower,
+      }),
       caveat:
         "Damage uses @smogon/calc Gen 9 mechanics with exact private stats when available and Gen 9 Random Battle default stats otherwise; hidden opponent information remains an assumption.",
     };
@@ -531,7 +554,7 @@ export function describeIncomingDamage(
       if (unestimated.length < 6) unestimated.push(move.name);
       continue;
     }
-    const entry = { move: move.name, ...estimate };
+    const entry = { move: move.name, priority: move.priority, ...estimate };
     if (revealedMoveIds.has(move.id)) revealed.push(entry);
     else possible.push(entry);
   }
@@ -548,9 +571,16 @@ export function describeIncomingDamage(
     : revealed.filter((entry) =>
       entry.estimated_damage_percent_range?.[1] >= currentHpPercent
     ).map((entry) => entry.move);
+  const observed = observedRevealedDamage(
+    opponent,
+    target,
+    battleState,
+    revealedMoveIds,
+  );
   return {
     revealed_move_damage_estimates: revealed.sort(byMaximumDamage),
     possible_move_damage_estimates: possible.slice(0, 5),
+    ...(observed.length ? { observed_revealed_move_damage: observed } : {}),
     ...(currentHpPercent === null ? {} : {
       current_hp_percent: currentHpPercent,
       revealed_moves_that_can_ko: revealedKoThreats,
@@ -561,6 +591,69 @@ export function describeIncomingDamage(
     caveat:
       "Possible-move estimates are candidate-set possibilities, not confirmed opponent moves.",
   };
+}
+
+/**
+ * Surface direct damage already observed from this active opponent against the
+ * current active Pokémon. This is deliberately advisory: prior rolls expose
+ * hidden items or stat spreads, but do not make the next random damage roll a
+ * mathematical guarantee.
+ */
+function observedRevealedDamage(
+  opponent: Pokemon,
+  target: Pokemon,
+  battleState: BattleSnapshot,
+  revealedMoveIds: Set<string>,
+): Data[] {
+  if (!opponent.ident || !target.ident || !revealedMoveIds.size) return [];
+  const currentHp = hpFromCondition(target)?.[0];
+  if (currentHp === undefined) return [];
+  const byMove = new Map<string, Data[]>();
+  for (const entry of battleState.observedDamage || []) {
+    if (
+      entry.source !== opponent.ident || entry.target !== target.ident ||
+      !revealedMoveIds.has(toID(entry.move))
+    ) continue;
+    const move = Dex.moves.get(String(entry.move));
+    // A single damage event is not a full attack for multi-hit moves.
+    if (!move.exists || move.multihit) continue;
+    const damage = Number(entry.damage_hp);
+    const maximum = Number(entry.target_max_hp);
+    if (!Number.isFinite(damage) || damage <= 0 || !Number.isFinite(maximum)) {
+      continue;
+    }
+    const samples = byMove.get(move.id) || [];
+    samples.push(entry);
+    byMove.set(move.id, samples);
+  }
+  return [...byMove.entries()].map(([moveId, samples]) => {
+    const move = Dex.moves.get(moveId);
+    const damages = samples.map((sample) => Number(sample.damage_hp));
+    const maximum = Number(samples[0].target_max_hp);
+    const minimum = Math.min(...damages);
+    const max = Math.max(...damages);
+    const observedMinimumPercent = roundedPercent(minimum * 100 / maximum);
+    const observedMaximumPercent = roundedPercent(max * 100 / maximum);
+    const couldKo = max >= currentHp;
+    return {
+      move: move.name,
+      observed_hit_count: samples.length,
+      observed_damage_hp_range: [minimum, max],
+      observed_damage_percent_range: [
+        observedMinimumPercent,
+        observedMaximumPercent,
+      ],
+      ...(couldKo ? { could_ko_current_active: true } : {}),
+      detail: couldKo
+        ? `${move.name} has already dealt up to ${max} HP (${observedMaximumPercent}%) to this active Pokémon; at its current HP, a similar roll could KO. This is an observed warning, not a guaranteed future roll.`
+        : `${move.name} has dealt ${observedMinimumPercent}-${observedMaximumPercent}% to this active Pokémon across ${samples.length} observed hit${
+          samples.length === 1 ? "" : "s"
+        }.`,
+    };
+  }).sort((left, right) =>
+    Number(right.observed_damage_hp_range[1]) -
+    Number(left.observed_damage_hp_range[1])
+  );
 }
 
 function lastMoveBy(
@@ -583,6 +676,99 @@ function revealedRecoveryMoves(opponent?: Pokemon | null): string[] {
   );
 }
 
+function eventParts(line: string): string[] {
+  return line.split("|");
+}
+
+/**
+ * Count immediately preceding successful Protect-family moves by the active
+ * Pokémon. In Gen 9, success is 1 / (3 ** streak) for the next such move.
+ * `-singleturn` is emitted only when the protection effect actually starts.
+ */
+function consecutiveSuccessfulStallingMovesByIdent(
+  activeIdent: string | undefined,
+  battleState: BattleSnapshot,
+): number {
+  if (!activeIdent || !battleState.turn) return 0;
+  const eventsByTurn = new Map<number, string[]>();
+  let observedTurn = 0;
+  for (const line of battleState.recentEvents || []) {
+    const parts = eventParts(line);
+    if (parts[1] === "turn") observedTurn = Number(parts[2]) || observedTurn;
+    if (!observedTurn) continue;
+    const turnEvents = eventsByTurn.get(observedTurn) || [];
+    turnEvents.push(line);
+    eventsByTurn.set(observedTurn, turnEvents);
+  }
+
+  let streak = 0;
+  for (let turn = battleState.turn - 1; turn >= 1; turn--) {
+    const turnEvents = eventsByTurn.get(turn) || [];
+    const moveIndex = turnEvents.findIndex((line) => {
+      const parts = eventParts(line);
+      return parts[1] === "move" && parts[2] === activeIdent;
+    });
+    if (moveIndex === -1) break;
+    const move = Dex.moves.get(eventParts(turnEvents[moveIndex])[3]);
+    const succeeded = turnEvents.slice(moveIndex + 1).some((line) => {
+      const parts = eventParts(line);
+      return parts[1] === "-singleturn" && parts[2] === activeIdent;
+    });
+    if (!move.stallingMove || !succeeded) break;
+    streak += 1;
+  }
+  return streak;
+}
+
+function consecutiveSuccessfulStallingMoves(
+  attacker: Pokemon,
+  battleState: BattleSnapshot,
+): number {
+  return consecutiveSuccessfulStallingMovesByIdent(
+    battleState.ownSide?.active?.ident || attacker.ident,
+    battleState,
+  );
+}
+
+/** Describe an opponent Protect-family move that just succeeded. */
+export function describeOpponentProtectOpportunity(
+  opponent: Pokemon | null | undefined,
+  battleState: BattleSnapshot,
+): Data | null {
+  const streak = consecutiveSuccessfulStallingMovesByIdent(
+    battleState.opponentSide?.active?.ident || opponent?.ident,
+    battleState,
+  );
+  if (!streak) return null;
+  const denominator = 3 ** streak;
+  return {
+    consecutive_successful_protects: streak,
+    repeated_protect_success_percent: roundedPercent(100 / denominator),
+    repeated_protect_success_fraction: `1/${denominator}`,
+    detail:
+      `The opponent just succeeded with ${streak} consecutive Protect-family move${
+        streak === 1 ? "" : "s"
+      }; another has a ${
+        roundedPercent(100 / denominator)
+      }% (1/${denominator}) success chance.`,
+  };
+}
+
+function stallingMoveWarning(
+  move: Data,
+  attacker: Pokemon,
+  battleState: BattleSnapshot,
+): string | null {
+  if (!move.stallingMove) return null;
+  const streak = consecutiveSuccessfulStallingMoves(attacker, battleState);
+  if (!streak) return null;
+  const denominator = 3 ** streak;
+  const percent = roundedPercent(100 / denominator);
+  return `${move.name} follows ${streak} consecutive successful Protect-family move${
+    streak === 1 ? "" : "s"
+  }; its success chance is ${percent}% (1/${denominator}).`;
+}
+
 /** Describe the risk and tactical context of staying in to use a move. */
 export function describeMoveTactics(
   move: Data,
@@ -603,6 +789,8 @@ export function describeMoveTactics(
       `Opponent has revealed recovery: ${recoveryMoves.join(", ")}`,
     );
   }
+  const stallingWarning = stallingMoveWarning(move, attacker, battleState);
+  if (stallingWarning) warnings.push(stallingWarning);
 
   const result: Data = {
     opponent_threats: describeOpponentThreats(opponent, attacker),
@@ -623,6 +811,23 @@ export function describeMoveTactics(
   if (toID(move.id) === "leechseed") {
     result.support_opportunity =
       "Leech Seed creates recurring chip and recovery, which is valuable against a foe with revealed recovery.";
+  }
+  if (toID(move.id) === "firstimpression") {
+    const enteredTurn = Number(attacker.enteredTurn);
+    if (
+      Number.isFinite(enteredTurn) &&
+      Number(battleState.turn) > enteredTurn + 1
+    ) {
+      result.conditional_action_warning =
+        "First Impression fails because this Pokémon is no longer on its first turn after entering.";
+    }
+  }
+  if (toID(move.id) === "suckerpunch") {
+    const protect = describeOpponentProtectOpportunity(opponent, battleState);
+    if (protect) {
+      result.conditional_action_warning =
+        `Sucker Punch fails if the opponent repeats Protect; its next Protect chance is ${protect.repeated_protect_success_percent}% (${protect.repeated_protect_success_fraction}).`;
+    }
   }
   return result;
 }
@@ -742,6 +947,69 @@ export function describeEntryHazards(
   };
 }
 
+/**
+ * Summarize the future HP cost of the hazards on our side. This is deliberately
+ * team-level context: looking only at the current switch candidate makes it
+ * easy to miss that hazards are about to make the rest of the team unusable.
+ */
+export function describeTeamHazardUrgency(
+  team: Pokemon[] = [],
+  battleState: BattleSnapshot = {},
+): Data | null {
+  const conditions = battleState.ownSide?.conditions || [];
+  const hazardNames = conditions
+    .filter((condition) =>
+      ["stealthrock", "spikes", "toxicspikes", "stickyweb"].includes(
+        condition.id,
+      )
+    )
+    .map((condition) => condition.name || condition.id);
+  if (!hazardNames.length) return null;
+
+  const affected = team
+    .filter((pokemon) => !pokemon.condition?.endsWith(" fnt"))
+    .map((pokemon) => {
+      const hazards = describeEntryHazards(
+        pokemon,
+        battleState.ownSide,
+        battleState.field,
+      );
+      return {
+        pokemon: pokemon.ident || pokemon.details,
+        entry_hazard_hp_loss_percent: hazards.entry_hazard_hp_loss_percent,
+        entry_hazard_effects: hazards.entry_hazard_effects,
+      };
+    })
+    .filter((pokemon) => pokemon.entry_hazard_hp_loss_percent > 0);
+  if (!affected.length) return null;
+
+  const totalLoss = roundedPercent(
+    affected.reduce(
+      (sum, pokemon) => sum + pokemon.entry_hazard_hp_loss_percent,
+      0,
+    ),
+  );
+  const severelyAffected = affected.filter((pokemon) =>
+    pokemon.entry_hazard_hp_loss_percent >= 25
+  );
+  const urgency = severelyAffected.length >= 2 || totalLoss >= 75
+    ? "high"
+    : severelyAffected.length || totalLoss >= 37.5
+    ? "medium"
+    : "low";
+  return {
+    urgency,
+    hazards: hazardNames,
+    affected_pokemon: affected,
+    total_future_entry_hazard_hp_loss_percent: totalLoss,
+    summary: `Hazard urgency: ${urgency} — ${
+      affected.map((pokemon) =>
+        `${pokemon.pokemon} loses ${pokemon.entry_hazard_hp_loss_percent}%`
+      ).join(", ")
+    }.`,
+  };
+}
+
 export function describeOpponentThreats(
   opponent: Pokemon | null | undefined,
   target: Pokemon,
@@ -782,6 +1050,36 @@ export function describeOpponentThreats(
       toID(move) === "terablast"
     ),
   };
+}
+
+/** List revealed or inferred entry hazards the active opponent may set. */
+export function describeOpponentHazardThreats(
+  opponent: Pokemon | null | undefined,
+): Data | null {
+  if (!opponent) return null;
+  const revealedMoves = new Set(
+    (opponent.revealedMoves || opponent.revealed_moves || []).map(toID),
+  );
+  const inference = inferGen9RandomBattleSet(opponent);
+  const possibleMoves = inference?.possibleMoves || [...revealedMoves];
+  const hazardMoves = possibleMoves.flatMap((moveName) => {
+    const move = Dex.moves.get(String(moveName));
+    if (!move.exists || !ENTRY_HAZARD_CONDITIONS.has(move.sideCondition)) {
+      return [];
+    }
+    return [{
+      move: move.name,
+      hazard: move.sideCondition,
+      source: revealedMoves.has(move.id) ? "revealed" : "inferred",
+    }];
+  });
+  return hazardMoves.length
+    ? {
+      possible_hazard_moves: hazardMoves,
+      caveat:
+        "Inferred hazards come from compatible Random Battle sets, not confirmed opponent moves.",
+    }
+    : null;
 }
 
 export function describeSwitchTactics(

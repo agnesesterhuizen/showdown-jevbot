@@ -18,6 +18,32 @@ function conditionText(condition?: string): string {
   return condition.replace(" fnt", " fainted");
 }
 
+/** Format an opponent chat message without treating it as a battle event. */
+export function formatOpponentChat(
+  line: string,
+  ownName?: string,
+  ownSide?: string | null,
+): string | null {
+  const parts = line.split("|");
+  let speaker: string | undefined;
+  let message: string | undefined;
+  if (parts[1] === "c") {
+    speaker = parts[2];
+    message = parts.slice(3).join("|");
+  } else if (parts[1] === "c:") {
+    speaker = parts[3];
+    message = parts.slice(4).join("|");
+  } else {
+    return null;
+  }
+  if (!speaker || !message) return null;
+  if (
+    speaker.toLowerCase() === ownName?.toLowerCase() ||
+    speaker === ownSide
+  ) return null;
+  return `${speaker}: ${message}`;
+}
+
 /** Format a battle protocol line for console output. */
 export function formatBattleEvent(
   line: string,
